@@ -9,14 +9,16 @@ import pyro.distributions as dist
 from pyro.infer.autoguide import AutoLaplaceApproximation
 from pyro.infer import SVI
 from pyro.infer import Trace_ELBO
+from pyro.infer.mcmc import NUTS
+from pyro.infer.mcmc import MCMC
 
 class BinomialGridApproximator():
-    def __init__(self, X, N, sample_size, prior_type):
+    def __init__(self, X, N, grid_size, prior_type):
         self.X = X
         self.N = N
-        self.sample_size = sample_size
+        self.grid_size = grid_size
 
-        self.param_grid = np.linspace(0, 1, self.sample_size)
+        self.param_grid = np.linspace(0, 1, self.grid_size)
 
         self.prior_type = prior_type
         self.prior = self._generate_prior()
@@ -25,7 +27,7 @@ class BinomialGridApproximator():
 
     def _generate_prior(self):
         if self.prior_type == 'uniform':
-            return np.repeat(1, self.sample_size)
+            return np.repeat(1, self.grid_size)
         elif self.prior_type == 'positive':
             return (self.param_grid > 0.5).astype(int)
         elif self.prior_type == 'laplace':
@@ -52,15 +54,21 @@ class BinomialGridApproximator():
 
     def _compute_posterior(self):
         posterior = self.prior * self.likelihood
-        return posterior/posterior.sum()
+        normalised_posterior = posterior/posterior.sum()
+        return normalised_posterior
+
+    def sample_posterior(self, sample_size):
+        return np.random.choice(self.param_grid, sample_size, p=self.posterior)
+        
 
 
 class BinomialQuadraticApproximator():
-    def __init__(self, X, N, n_steps, learning_rate, prior_type):
+    def __init__(self, X, N, n_steps, learning_rate, prior_type, infer_type):
         self.X = X
         self.N = N
         self.n_steps = n_steps
         self.prior_type = prior_type
+        self.infer_type = infer_type
 
         self.optimiser = pyro.optim.Adam({'lr': learning_rate})
         self.map_guide = AutoLaplaceApproximation(self.model)
@@ -78,10 +86,16 @@ class BinomialQuadraticApproximator():
         plt.plot(self._posterior_approximate_scale)
         plt.title('Posterior Scale (Variance)')
 
-    def train(self):
+    def train(self, **kwargs):
         pyro.clear_param_store()
-        svi = SVI(self.model, self.map_guide, self.optimiser, Trace_ELBO())
+        if self.infer_type == 'svi':
+            self._svi_trainer(**kwargs)
+        elif self.infer_type == 'mcmc':
+            self._mcmc_trainer(**kwargs)
+        
 
+    def _svi_trainer(self):
+        svi = SVI(self.model, self.map_guide, self.optimiser, Trace_ELBO())
         self.losses = []
         self._posterior_approximate_mean = []
         self._posterior_approximate_scale = []
@@ -94,6 +108,12 @@ class BinomialQuadraticApproximator():
 
             if step % 50 == 0:
                 print('[iter {}]  loss: {:.4f}'.format(step, loss))
+
+    def _mcmc_trainer(self, step_size=0.1, num_samples=1000, warmup_steps=100):
+        mcmc_kernel = NUTS(self.model, step_size=step_size)
+        self.mcmc = MCMC(mcmc_kernel, num_samples=num_samples, warmup_steps=warmup_steps)
+        self.mcmc.run(self.X)
+        
 
     def model(self, data):
         if self.prior_type == 'uniform':
