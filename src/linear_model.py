@@ -1,3 +1,4 @@
+from functools import partial
 import torch
 import torch.nn as nn
 import pyro
@@ -21,34 +22,53 @@ plt.style.use('ggplot')
 import seaborn as sns
 
 
-class BayesianMCMCLinearModel():
-    def __init__(self, warmup_steps=100, num_samples=1000):
+class BayesianLinearModel():
+    '''Object to hold the data and the model of a Bayesian linear model.
+
+    '''
+    def __init__(self, X, y, prior):
+        self.X = X
+        self.y = y
+        # we can make prior optional here.
+        self.prior = prior
+        self.model = self._create_linear_model()
+
+    def _create_linear_model(self):
+        ''' Create a linear model from the prior specified.
+        '''
+        input_size = X.shape[0]
+
+        def _model_(self):
+            bias = pyro.sample('bias', self.prior['bias'])
+            weights = pyro.sample('weights', self.prior['weights'])
+            sigma = pyro.sample('sigma', self.prior['sigma'])
+            prior_mean = bias + self.X @ weights
+            self.obs_distribution = dist.Normal(prior_mean, sigma)
+            with pyro.plate('data', input_size):
+                return pyro.sample('obs', self.obs_distribution, obs=self.y)
+        return partial(_model_, self)
+
+    def _generate_reference_prior(self):
+        '''create a reference prior in the absence of a model.
+
+        '''
+        pass
+
+
+class BayesianMCMCLinearModel(BayesianLinearModel):
+    def __init__(self, X, y, prior, warmup_steps=100, num_samples=1000):
+        super().__init__(X, y, prior)
         self.warmup_steps = warmup_steps
         self.num_samples = num_samples
 
-    def model(self, X, y):
-        input_size = X.shape[0]
 
-        # sample
-        bias = pyro.sample('bias', self.bias_prior)
-        weights = pyro.sample('weights', self.weights_prior)
-        sigma = pyro.sample('sigma', self.sigma_prior)
-        prior_mean = bias + X @ weights
-        self.obs_distribution = dist.Normal(prior_mean, sigma)
-        with pyro.plate('data', input_size):
-            return pyro.sample('obs', self.obs_distribution, obs=y)
-
-    def fit(self, X, y):
+    def fit(self):
         pyro.clear_param_store()
-        self.X = X
-        self.y = y
-
-        self._create_prior(X, y)
         self.kernel = NUTS(self.model)
         self.mcmc = MCMC(self.kernel,
                          warmup_steps=self.warmup_steps,
                          num_samples=self.num_samples)
-        self.mcmc.run(X, y)
+        self.mcmc.run()
         self._posterior_sample_df()
 
     def generate_posterior_samples(self,
@@ -78,37 +98,36 @@ class BayesianMCMCLinearModel():
         # counter factual plots
         pass
 
-    def plot_dist(self):
+    def _plot_prior_posterior(self, prior_sample, posterior_sample, label):
+        plot_df = pd.concat([pd.DataFrame({'value': prior_sample, 'type': 'prior'}),
+                             pd.DataFrame({'value': posterior_sample, 'type': 'posterior'})])
+        ax = sns.histplot(data=plot_df, x='value', hue='type', kde=True)
+        ax.set(xlabel = '', ylabel=label)
+
+
+    def plot_prior_posterior(self, sample_size=1000):
         # need to determine the total number of param
         param_num = self.posterior_df.shape[1]
 
         # plot bias
         plt.subplot(param_num, 1, 1)
-        prior_sample = pd.DataFrame({'value': lm.bias_prior.rsample((1000, )), 'type': 'prior'})
-        posterior_sample = pd.DataFrame({'value': lm.posterior_df['bias'], 'type': 'posterior'})
-        plot_df = pd.concat([prior_sample, posterior_sample])
-        ax = sns.histplot(data=plot_df, x='value', hue='type', kde=True)
-        ax.set(xlabel='bias', ylabel = '')
+        self._plot_prior_posterior(prior_sample=self.prior['bias'].rsample((sample_size, )),
+                                   posterior_sample=self.posterior_df['bias'],
+                                   label='bias')
 
         # plot weights
-        w = lm.weights_prior.rsample((1000, ))
+        w = self.prior['weights'].rsample((1000, ))
         for i in range(w.shape[1]):
             plt.subplot(param_num, 1, i + 2)
-            prior_sample = pd.DataFrame({'value': w[:, i], 'type': 'prior'})
-            posterior_sample = pd.DataFrame({'value': lm.posterior_df[f'weights_{i + 1}'],
-                                             'type': 'posterior'})
-            plot_df = pd.concat([prior_sample, posterior_sample])
-            ax = sns.histplot(data=plot_df, x='value', hue='type', kde=True)
-            ax.set(xlabel=f'weights_{i + 1}', ylabel = '')
+            self._plot_prior_posterior(prior_sample=w[:, i],
+                                       posterior_sample=self.posterior_df[f'weights_{i + 1}'],
+                                       label=f'weights_{i + 1}')
 
         # plot sigma
         plt.subplot(param_num, 1, param_num)
-        prior_sample = pd.DataFrame({'value': lm.sigma_prior.rsample((1000, )), 'type': 'prior'})
-        posterior_sample = pd.DataFrame({'value': lm.posterior_df['sigma'], 'type': 'posterior'})
-        plot_df = pd.concat([prior_sample, posterior_sample])
-        ax = sns.histplot(data=plot_df, x='value', hue='type', kde=True)
-        ax.set(xlabel='sigma', ylabel = '')
-
+        self._plot_prior_posterior(self.prior['sigma'].rsample((sample_size, )),
+                                   self.posterior_df['sigma'],
+                                   label='sigma')
         plt.show()
 
     def plot_predicted(self):
@@ -120,17 +139,6 @@ class BayesianMCMCLinearModel():
         ax.set(xlabel='Observed', ylabel='predicted')
         ax.plot([self.y.min(), self.y.max()], [y_pred.min(), y_pred.max()], ls="--", c=".3")
         plt.show()
-
-    def _create_prior(self, X, y):
-        input_size = X.shape[0]
-        self.input_dim = X.shape[1]
-        
-        w_mu_init = torch.zeros(self.input_dim)
-        w_sigma_init = torch.eye(self.input_dim)
-
-        self.bias_prior = dist.Normal(0, 10)
-        self.weights_prior = dist.MultivariateNormal(w_mu_init, w_sigma_init)
-        self.sigma_prior = dist.InverseGamma(10, 50)
 
     def _posterior_sample_df(self):
         posterior_sample = self.generate_posterior_samples(n_samples=1000)
