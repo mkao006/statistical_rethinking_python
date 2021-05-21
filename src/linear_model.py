@@ -36,7 +36,7 @@ class BayesianLinearModel():
     def _create_linear_model(self):
         ''' Create a linear model from the prior specified.
         '''
-        input_size = X.shape[0]
+        input_size = self.X.shape[0]
 
         def _model_(self):
             bias = pyro.sample('bias', self.prior['bias'])
